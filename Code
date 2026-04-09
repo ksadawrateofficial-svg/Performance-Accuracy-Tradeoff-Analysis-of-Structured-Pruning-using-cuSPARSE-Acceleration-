@@ -1,0 +1,142 @@
+%%writefile main.cu
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
+#include <cusparse.h>
+#include <time.h>
+
+#define N 256
+
+// ---------------- LOAD ----------------
+void load(float *A){
+    FILE *f = fopen("weights.txt","r");
+    if(!f){ printf("weights.txt missing\n"); exit(1); }
+    for(int i=0;i<N*N;i++) fscanf(f,"%f",&A[i]);
+    fclose(f);
+}
+
+// ---------------- CPU ----------------
+void dense(float *A,float *x,float *y){
+    for(int i=0;i<N;i++){
+        y[i]=0;
+        for(int j=0;j<N;j++)
+            y[i]+=A[i*N+j]*x[j];
+    }
+}
+
+// ---------------- CSR ----------------
+void csr(float *A,float *val,int *col,int *row,int *nnz){
+    int c=0; row[0]=0;
+    for(int i=0;i<N;i++){
+        for(int j=0;j<N;j++){
+            if(A[i*N+j]!=0){
+                val[c]=A[i*N+j];
+                col[c]=j;
+                c++;
+            }
+        }
+        row[i+1]=c;
+    }
+    *nnz=c;
+}
+
+// ---------------- MAIN ----------------
+int main(){
+
+    float *A=(float*)malloc(N*N*sizeof(float));
+    float *x=(float*)malloc(N*sizeof(float));
+    float *y_cpu=(float*)malloc(N*sizeof(float));
+    float *y_gpu=(float*)malloc(N*sizeof(float));
+
+    load(A);
+
+    for(int i=0;i<N;i++) x[i]=1;
+
+    // ---------------- CPU ----------------
+    clock_t s=clock();
+    dense(A,x,y_cpu);
+    clock_t e=clock();
+
+    float cpu_time=(float)(e-s)/CLOCKS_PER_SEC*1000;
+
+    // ---------------- CSR ----------------
+    float *val=(float*)malloc(N*N*sizeof(float));
+    int *col=(int*)malloc(N*N*sizeof(int));
+    int *row=(int*)malloc((N+1)*sizeof(int));
+    int nnz;
+
+    csr(A,val,col,row,&nnz);
+
+    // ---------------- GPU ----------------
+    float *d_val,*d_x,*d_y;
+    int *d_col,*d_row;
+
+    cudaMalloc(&d_val,nnz*sizeof(float));
+    cudaMalloc(&d_col,nnz*sizeof(int));
+    cudaMalloc(&d_row,(N+1)*sizeof(int));
+    cudaMalloc(&d_x,N*sizeof(float));
+    cudaMalloc(&d_y,N*sizeof(float));
+
+    cudaMemcpy(d_val,val,nnz*sizeof(float),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_col,col,nnz*sizeof(int),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_row,row,(N+1)*sizeof(int),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x,x,N*sizeof(float),cudaMemcpyHostToDevice);
+
+    cusparseHandle_t handle;
+    cusparseCreate(&handle);
+
+    cusparseSpMatDescr_t mat;
+    cusparseDnVecDescr_t vecX, vecY;
+
+    cusparseCreateCsr(&mat,N,N,nnz,d_row,d_col,d_val,
+        CUSPARSE_INDEX_32I,CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO,CUDA_R_32F);
+
+    cusparseCreateDnVec(&vecX,N,d_x,CUDA_R_32F);
+    cusparseCreateDnVec(&vecY,N,d_y,CUDA_R_32F);
+
+    float alpha=1.0f, beta=0.0f;
+
+    size_t bufferSize=0;
+    void *dBuffer=NULL;
+
+    cusparseSpMV_bufferSize(handle,CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,mat,vecX,&beta,vecY,
+        CUDA_R_32F,CUSPARSE_SPMV_ALG_DEFAULT,&bufferSize);
+
+    cudaMalloc(&dBuffer, bufferSize);
+
+    // WARMUP
+    cusparseSpMV(handle,CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,mat,vecX,&beta,vecY,
+        CUDA_R_32F,CUSPARSE_SPMV_ALG_DEFAULT,dBuffer);
+    cudaDeviceSynchronize();
+
+    // ---------------- GPU TIMING ----------------
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+
+    cusparseSpMV(handle,CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha,mat,vecX,&beta,vecY,
+        CUDA_R_32F,CUSPARSE_SPMV_ALG_DEFAULT,dBuffer);
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float gpu_time;
+    cudaEventElapsedTime(&gpu_time,start,stop);
+
+    cudaMemcpy(y_gpu,d_y,N*sizeof(float),cudaMemcpyDeviceToHost);
+
+    // ---------------- OUTPUT ----------------
+    printf("\n===== FINAL RESULT =====\n");
+    printf("NNZ = %d\n", nnz);
+    printf("CPU Time = %.3f ms\n", cpu_time);
+    printf("GPU Time = %.3f ms\n", gpu_time);
+    printf("Speedup = %.2fx\n", cpu_time/gpu_time);
+
+    return 0;
+}
