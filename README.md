@@ -54,14 +54,6 @@ This shows that we can **significantly speed up computation** while maintaining 
 
 ---
 
-## Tradeoff Visualization
-
-This graph shows how **speed improves as accuracy decreases**, and helps find the best balance.
-
-![Tradeoff](results/tradeoff.png)
-
----
-
 ## Tech Stack
 
 * Python (PyTorch)
